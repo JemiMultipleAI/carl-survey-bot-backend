@@ -79,23 +79,28 @@ export class CallController {
         });
       }
 
-      // Create call record
-      const call = await supabaseService.createCall({
-        customer_first_name: firstName,
-        customer_phone: phoneNumber,
-        call_sid: '',
-        call_status: 'queued',
-      });
-
-      // Initiate ElevenLabs call
+      // Initiate ElevenLabs call first to get conversation ID
+      console.log('📞 Initiating ElevenLabs call...');
       const conversationId = await elevenlabsService.initiateCall({
         to: phoneNumber,
         firstName: firstName,
-        callSid: call.id,
+        callSid: '', // Will be set in database
       });
 
-      // Update call record with ElevenLabs conversation ID
-      await supabaseService.updateCallStatus(conversationId, 'queued');
+      console.log('✅ ElevenLabs call initiated, conversation ID:', conversationId);
+
+      // Create call record with conversation ID immediately
+      console.log('💾 Creating call record in Supabase...');
+      const call = await supabaseService.createCall({
+        customer_first_name: firstName,
+        customer_phone: phoneNumber,
+        call_sid: conversationId,
+        customer_id: customerId,
+        campaign_id: customer.campaign_id,
+        call_status: 'queued',
+      });
+
+      console.log('✅ Call record created with ID:', call.id);
 
       res.json({
         success: true,
@@ -138,20 +143,22 @@ export class CallController {
               throw new Error(`Customer ${customerId} not found`);
             }
 
-            const call = await supabaseService.createCall({
-              customer_first_name: customer.first_name,
-              customer_phone: customer.phone_number,
-              call_sid: '',
-              call_status: 'queued',
-            });
-
+            // Initiate ElevenLabs call first to get conversation ID
             const conversationId = await elevenlabsService.initiateCall({
               to: customer.phone_number,
               firstName: customer.first_name,
-              callSid: call.id,
+              callSid: '', // Will be set in database
             });
 
-            await supabaseService.updateCallStatus(conversationId, 'queued');
+            // Create call record with conversation ID immediately
+            const call = await supabaseService.createCall({
+              customer_first_name: customer.first_name,
+              customer_phone: customer.phone_number,
+              call_sid: conversationId,
+              customer_id: customerId,
+              campaign_id: customer.campaign_id,
+              call_status: 'queued',
+            });
 
             return {
               customerId,

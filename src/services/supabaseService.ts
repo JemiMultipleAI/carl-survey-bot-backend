@@ -36,6 +36,8 @@ export interface SurveyCall {
   customer_first_name: string;
   customer_phone: string;
   call_sid: string;
+  customer_id?: string;
+  campaign_id?: string;
   call_status: 'queued' | 'in-progress' | 'completed' | 'failed' | 'no-answer';
   call_duration?: number;
   created_at: string;
@@ -49,6 +51,15 @@ export interface SurveyResponse {
   question_text: string;
   response_text: string;
   response_sentiment?: 'positive' | 'neutral' | 'negative';
+  response_timestamp?: string;
+  is_followup?: boolean;
+  created_at: string;
+}
+
+export interface CallTranscript {
+  id: string;
+  call_id: string;
+  transcript: any; // JSONB
   created_at: string;
 }
 
@@ -188,6 +199,29 @@ export class SupabaseService {
       .order('uploaded_at', { ascending: false });
 
     if (error) throw error;
+    return data;
+  }
+
+  // Transcript operations
+  async createTranscript(transcript: Omit<CallTranscript, 'id' | 'created_at'>) {
+    const { data, error } = await getSupabase()
+      .from('call_transcripts')
+      .insert([transcript])
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
+  }
+
+  async getTranscriptByCallId(callId: string) {
+    const { data, error } = await getSupabase()
+      .from('call_transcripts')
+      .select('*')
+      .eq('call_id', callId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows returned
     return data;
   }
 

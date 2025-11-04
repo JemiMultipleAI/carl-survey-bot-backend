@@ -21,6 +21,8 @@ CREATE TABLE survey_calls (
     customer_first_name TEXT NOT NULL,
     customer_phone TEXT NOT NULL,
     call_sid TEXT UNIQUE,
+    customer_id UUID REFERENCES customers(id),
+    campaign_id TEXT,
     call_status TEXT NOT NULL CHECK (call_status IN ('queued', 'in-progress', 'completed', 'failed', 'no-answer')),
     call_duration INTEGER, -- in seconds
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -35,6 +37,8 @@ CREATE TABLE survey_responses (
     question_text TEXT NOT NULL,
     response_text TEXT NOT NULL,
     response_sentiment TEXT CHECK (response_sentiment IN ('positive', 'neutral', 'negative')),
+    response_timestamp TIMESTAMP WITH TIME ZONE,
+    is_followup BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -44,6 +48,8 @@ CREATE INDEX idx_customers_campaign ON customers(campaign_id);
 CREATE INDEX idx_survey_calls_status ON survey_calls(call_status);
 CREATE INDEX idx_survey_calls_sid ON survey_calls(call_sid);
 CREATE INDEX idx_survey_calls_created ON survey_calls(created_at);
+CREATE INDEX idx_survey_calls_customer_id ON survey_calls(customer_id);
+CREATE INDEX idx_survey_calls_campaign_id ON survey_calls(campaign_id);
 CREATE INDEX idx_survey_responses_call_id ON survey_responses(call_id);
 CREATE INDEX idx_survey_responses_question ON survey_responses(question_number);
 
@@ -85,6 +91,26 @@ CREATE POLICY "Authenticated users can read calls" ON survey_calls
     FOR SELECT USING (auth.role() = 'authenticated');
 
 CREATE POLICY "Authenticated users can read responses" ON survey_responses
+    FOR SELECT USING (auth.role() = 'authenticated');
+
+-- Call transcripts table for full conversation storage
+CREATE TABLE call_transcripts (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    call_id UUID NOT NULL REFERENCES survey_calls(id) ON DELETE CASCADE,
+    transcript JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for transcript lookups
+CREATE INDEX idx_call_transcripts_call_id ON call_transcripts(call_id);
+
+-- RLS policies for call_transcripts
+ALTER TABLE call_transcripts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role can access all transcripts" ON call_transcripts
+    FOR ALL USING (auth.role() = 'service_role');
+
+CREATE POLICY "Authenticated users can read transcripts" ON call_transcripts
     FOR SELECT USING (auth.role() = 'authenticated');
 
 -- Insert some sample data for testing

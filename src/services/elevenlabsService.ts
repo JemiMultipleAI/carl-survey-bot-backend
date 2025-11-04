@@ -39,7 +39,7 @@ export class ElevenLabsService {
   constructor() {
     this.apiKey = process.env.ELEVENLABS_API_KEY || 'placeholder_key';
     this.agentId = process.env.ELEVENLABS_AGENT_ID || 'placeholder_agent';
-    
+
     this.client = new ElevenLabsClient({
       apiKey: this.apiKey,
     });
@@ -51,7 +51,7 @@ export class ElevenLabsService {
       // According to ElevenLabs docs: https://elevenlabs.io/docs/api-reference/twilio/outbound-call
       // We need to use the /v1/convai/twilio/outbound-call endpoint
       const agentPhoneNumberId = process.env.ELEVENLABS_AGENT_PHONE_NUMBER_ID || '';
-      
+
       if (!agentPhoneNumberId) {
         throw new Error('ELEVENLABS_AGENT_PHONE_NUMBER_ID environment variable is required for Twilio outbound calls');
       }
@@ -85,6 +85,39 @@ export class ElevenLabsService {
     } catch (error) {
       console.error('ElevenLabs call initiation error:', error);
       throw new Error('Failed to initiate call with ElevenLabs');
+    }
+  }
+
+  // Get conversation details from ElevenLabs API
+  async getConversationDetails(conversationId: string): Promise<any> {
+    try {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/convai/conversations/${conversationId}`,
+        {
+          method: 'GET',
+          headers: {
+            'xi-api-key': this.apiKey,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`ElevenLabs API error: ${response.status} - ${errorText}`);
+        throw new Error(`Failed to get conversation details: ${response.status}`);
+      }
+
+      const data = await response.json() as any;
+      console.log('📋 Conversation details retrieved:', {
+        conversation_id: data.conversation_id,
+        status: data.status,
+        transcript_length: data.transcript?.length || 0,
+      });
+      return data;
+    } catch (error) {
+      console.error('Error fetching conversation details:', error);
+      throw new Error('Failed to get conversation details from ElevenLabs');
     }
   }
 
@@ -206,7 +239,7 @@ TONE: Friendly, professional, conversational. Keep responses concise (1-2 senten
     // This is a simplified version - in reality, you'd need to track conversation state
     // to determine which question was being answered
     const questionNumber = await this.getCurrentQuestionNumber(callId);
-    
+
     await supabaseService.createResponse({
       call_id: callId,
       question_number: questionNumber,
@@ -242,15 +275,69 @@ TONE: Friendly, professional, conversational. Keep responses concise (1-2 senten
     return questions[questionNumber - 1] || 'Additional feedback';
   }
 
+  // Detect which question is being asked from agent message text
+  detectQuestionFromText(text: string): number | null {
+    const lowerText = text.toLowerCase();
+    
+    // Q1: "How long have you been using"
+    if (lowerText.includes('how long have you been using') || 
+        lowerText.includes('how long have you been')) {
+      return 1;
+    }
+    
+    // Q2: "main reason" or "continue to work with us"
+    if ((lowerText.includes('main reason') || lowerText.includes('reason you continue')) &&
+        (lowerText.includes('continue') || lowerText.includes('work with us'))) {
+      return 2;
+    }
+    
+    // Q3: "meeting expectations" (but check it's not a follow-up)
+    if (lowerText.includes('meeting expectations') && 
+        !lowerText.includes('how important') && 
+        !lowerText.includes('how could we improve')) {
+      return 3;
+    }
+    
+    // Q4: "safety expectations" (but check it's not a follow-up)
+    if (lowerText.includes('safety expectations') && 
+        !lowerText.includes('what actions show') &&
+        !lowerText.includes('what actions don\'t')) {
+      return 4;
+    }
+    
+    // Q5: "anything else"
+    if (lowerText.includes('anything else') || 
+        lowerText.includes('anything about your business')) {
+      return 5;
+    }
+    
+    return null; // Follow-up or unrecognized
+  }
+
+  // Check if a question is a follow-up
+  isFollowUpQuestion(text: string): boolean {
+    const lowerText = text.toLowerCase();
+    const followUpPatterns = [
+      'how important',
+      'how could we improve',
+      'what actions show',
+      'what actions don\'t',
+      'what actions show safe',
+      'what actions don\'t meet',
+    ];
+    
+    return followUpPatterns.some(pattern => lowerText.includes(pattern));
+  }
+
   // Simple sentiment analysis
   analyzeSentiment(text: string): 'positive' | 'neutral' | 'negative' {
     const positiveWords = ['good', 'great', 'excellent', 'satisfied', 'happy', 'pleased', 'love', 'amazing'];
     const negativeWords = ['bad', 'terrible', 'awful', 'disappointed', 'unhappy', 'hate', 'worst', 'poor'];
-    
+
     const lowerText = text.toLowerCase();
     const positiveCount = positiveWords.filter(word => lowerText.includes(word)).length;
     const negativeCount = negativeWords.filter(word => lowerText.includes(word)).length;
-    
+
     if (positiveCount > negativeCount) return 'positive';
     if (negativeCount > positiveCount) return 'negative';
     return 'neutral';

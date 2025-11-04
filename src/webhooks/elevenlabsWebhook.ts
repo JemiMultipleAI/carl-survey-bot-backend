@@ -4,6 +4,73 @@ import { supabaseService } from '../services/supabaseService';
 
 const router = Router();
 
+// Helper function to parse transcript and extract survey responses
+async function parseTranscriptToResponses(callId: string, transcript: any[], metadata: any) {
+  let currentQuestion: number | null = null;
+  const callStartTime = metadata.start_time_unix_secs 
+    ? new Date(metadata.start_time_unix_secs * 1000)
+    : new Date(); // Fallback to current time
+
+  console.log(`📝 Parsing ${transcript.length} transcript entries...`);
+
+  for (let i = 0; i < transcript.length; i++) {
+    const entry = transcript[i];
+    const role = entry.role || entry.speaker;
+    const message = entry.message || entry.response || entry.text || '';
+    const timeInCallSecs = entry.time_in_call_secs;
+
+    // Calculate response timestamp
+    let responseTimestamp: string | undefined;
+    if (timeInCallSecs !== undefined && metadata.start_time_unix_secs) {
+      responseTimestamp = new Date((metadata.start_time_unix_secs + timeInCallSecs) * 1000).toISOString();
+    } else if (timeInCallSecs !== undefined) {
+      // Relative to call start time
+      responseTimestamp = new Date(callStartTime.getTime() + timeInCallSecs * 1000).toISOString();
+    }
+
+    if (role === 'assistant' || role === 'agent') {
+      // Detect which question is being asked
+      const detectedQuestion = elevenlabsService.detectQuestionFromText(message);
+      const isFollowUp = elevenlabsService.isFollowUpQuestion(message);
+      
+      if (detectedQuestion) {
+        currentQuestion = detectedQuestion;
+        console.log(`🤖 Agent asked Q${detectedQuestion}: ${message.substring(0, 50)}...`);
+      } else if (isFollowUp && currentQuestion !== null) {
+        // Keep current question for follow-up responses
+        console.log(`🤖 Follow-up question for Q${currentQuestion}: ${message.substring(0, 50)}...`);
+      }
+    } else if (role === 'user' && currentQuestion !== null) {
+      // Check if previous message was a follow-up
+      const previousEntry = i > 0 ? transcript[i - 1] : null;
+      const isFollowUp = previousEntry && 
+        (previousEntry.role === 'assistant' || previousEntry.role === 'agent') &&
+        elevenlabsService.isFollowUpQuestion(
+          previousEntry.message || previousEntry.response || ''
+        );
+
+      console.log(`👤 User responded to Q${currentQuestion}${isFollowUp ? ' (follow-up)' : ''}: ${message.substring(0, 50)}...`);
+      
+      await supabaseService.createResponse({
+        call_id: callId,
+        question_number: currentQuestion,
+        question_text: elevenlabsService.getQuestionText(currentQuestion),
+        response_text: message,
+        response_sentiment: elevenlabsService.analyzeSentiment(message),
+        response_timestamp: responseTimestamp,
+        is_followup: isFollowUp || false,
+      });
+
+      // Reset current question after saving main response (not follow-up)
+      if (!isFollowUp) {
+        currentQuestion = null;
+      }
+    }
+  }
+
+  console.log('✅ Finished parsing transcript');
+}
+
 // ElevenLabs conversation webhook
 router.post('/conversation', async (req: Request, res: Response) => {
   try {
@@ -36,60 +103,63 @@ router.post('/conversation', async (req: Request, res: Response) => {
     // Process the event asynchronously
     setImmediate(async () => {
       try {
-        // Handle post_call_transcription event - contains complete transcript
-        if (eventType === 'post_call_transcription') {
-          console.log('📝 Processing post-call transcription');
-          const conversationId = event.data?.conversation_id;
-          const transcript = event.data?.transcript || [];
-          const dataCollection = event.data?.analysis?.data_collection_results || {};
+        // Handle conversation ended or post_call_transcription - fetch transcript from API
+        if (eventType === 'conversation_ended' || eventType === 'post_call_transcription' || eventType === 'conversation_completed') {
+          const conversationId = callSid || event.data?.conversation_id || event.conversation_id;
           
-          console.log('🔍 Looking for call with conversation ID:', conversationId);
+          if (!conversationId) {
+            console.log('⚠️  No conversation ID found in webhook');
+            return;
+          }
+
+          console.log('📝 Processing conversation completion for:', conversationId);
           
-          if (conversationId) {
-            const call = await supabaseService.getCallBySid(conversationId);
-            console.log('🔍 Call lookup result:', call ? `Found call ${call.id}` : 'Call not found');
+          // Find call record
+          const call = await supabaseService.getCallBySid(conversationId);
+          if (!call) {
+            console.log('⚠️  Call not found for conversation:', conversationId);
+            return;
+          }
+
+          console.log(`📊 Found call: ${call.id}`);
+
+          try {
+            // Fetch complete transcript from ElevenLabs API (source of truth)
+            console.log('🔍 Fetching conversation details from ElevenLabs API...');
+            const conversationData = await elevenlabsService.getConversationDetails(conversationId);
             
-            if (call) {
-              console.log(`📊 Found call: ${call.id}`);
-              
-              // Process all user responses from data collection
-              const questionMapping: Record<string, { number: number; text: string }> = {
-                'q1': { number: 1, text: 'How long have you been using Great Southern Fuels?' },
-                'q2': { number: 2, text: 'What\'s the main reason you continue to work with us?' },
-                'q3': { number: 3, text: 'Has our service been meeting expectations in that area?' },
-                'q4': { number: 4, text: 'Do our actions on site and on the road meet your safety expectations?' },
-                'q5': { number: 5, text: 'Anything else about your business or our service you\'d like to mention?' },
-              };
+            const transcript = conversationData.transcript || [];
+            const metadata = conversationData.metadata || {};
+            
+            console.log(`📋 Received transcript with ${transcript.length} entries`);
 
-              // Save each extracted response
-              console.log(`💾 Processing ${Object.keys(dataCollection).length} data collection entries...`);
-              let savedCount = 0;
-              
-              for (const [key, data] of Object.entries(dataCollection)) {
-                const question = questionMapping[key.toLowerCase()];
-                const responseData = data as any;
-                if (question && responseData.value) {
-                  console.log(`💾 Saving Q${question.number}: ${responseData.value}`);
-                  await supabaseService.createResponse({
-                    call_id: call.id,
-                    question_number: question.number,
-                    question_text: question.text,
-                    response_text: responseData.value,
-                    response_sentiment: elevenlabsService.analyzeSentiment(responseData.value),
-                  });
-                  savedCount++;
-                }
-              }
-              
-              console.log(`✅ Saved ${savedCount} responses to database`);
+            // Store full transcript
+            await supabaseService.createTranscript({
+              call_id: call.id,
+              transcript: transcript,
+            });
+            console.log('✅ Stored full transcript in database');
 
-              // Update call status to completed
-              const callDuration = event.data?.metadata?.call_duration_secs;
-              await supabaseService.updateCallStatus(conversationId, 'completed', callDuration);
-              
-              console.log('✅ Completed and saved all responses to database');
-            } else {
-              console.log('⚠️  Call not found for conversation:', conversationId);
+            // Parse transcript to extract Q1-Q5 responses
+            await parseTranscriptToResponses(call.id, transcript, metadata);
+
+            // Update call status and duration
+            const callDuration = metadata.call_duration_secs || event.data?.metadata?.call_duration_secs;
+            await supabaseService.updateCallStatus(conversationId, 'completed', callDuration);
+
+            console.log('✅ Completed processing conversation');
+          } catch (apiError) {
+            console.error('❌ Error fetching from API, trying webhook transcript fallback:', apiError);
+            
+            // Fallback: Try to use webhook transcript if available
+            const webhookTranscript = event.transcript || event.data?.transcript || [];
+            if (webhookTranscript.length > 0) {
+              console.log('📋 Using webhook transcript as fallback');
+              await supabaseService.createTranscript({
+                call_id: call.id,
+                transcript: webhookTranscript,
+              });
+              await parseTranscriptToResponses(call.id, webhookTranscript, event.data?.metadata || {});
             }
           }
         }
@@ -98,39 +168,6 @@ router.post('/conversation', async (req: Request, res: Response) => {
           console.log('🚀 Conversation started');
           if (callSid) {
             await supabaseService.updateCallStatus(callSid, 'in-progress');
-          }
-        }
-        
-        if (eventType === 'user_message' || eventType === 'user_speech') {
-          console.log('👤 User message:', event.message?.content || event.text);
-          
-          if (callSid) {
-            const call = await supabaseService.getCallBySid(callSid);
-            if (call) {
-              // Save user response
-              const questionNumber = await elevenlabsService.getCurrentQuestionNumber(call.id);
-              
-              await supabaseService.createResponse({
-                call_id: call.id,
-                question_number: questionNumber,
-                question_text: elevenlabsService.getQuestionText(questionNumber),
-                response_text: event.message?.content || event.text || '',
-                response_sentiment: elevenlabsService.analyzeSentiment(event.message?.content || event.text || ''),
-              });
-              
-              console.log('💾 Saved response to database');
-            }
-          }
-        }
-        
-        if (eventType === 'assistant_message' || eventType === 'assistant_speech') {
-          console.log('🤖 Assistant message:', event.message?.content || event.text);
-        }
-        
-        if (eventType === 'conversation_ended') {
-          console.log('✅ Conversation ended');
-          if (callSid) {
-            await supabaseService.updateCallStatus(callSid, 'completed');
           }
         }
         
