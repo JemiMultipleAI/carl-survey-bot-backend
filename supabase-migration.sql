@@ -35,3 +35,4 @@ CREATE POLICY "Service role can access all transcripts" ON call_transcripts
 CREATE POLICY "Authenticated users can read transcripts" ON call_transcripts
     FOR SELECT USING (auth.role() = 'authenticated');
 
+
