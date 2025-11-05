@@ -68,7 +68,7 @@ export class ElevenLabsService {
           agent_phone_number_id: agentPhoneNumberId,
           to_number: options.to,
           conversation_initiation_client_data: {
-            customer_name: options.firstName,
+            customer_name: options.firstName || '',
             call_sid: options.callSid || '',
           },
         }),
