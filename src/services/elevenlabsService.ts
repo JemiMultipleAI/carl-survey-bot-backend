@@ -29,6 +29,7 @@ export interface ElevenLabsCallOptions {
   to: string;
   firstName: string;
   callSid?: string;
+  dynamicVariables?: Record<string, string | number | boolean>;
 }
 
 export class ElevenLabsService {
@@ -56,6 +57,12 @@ export class ElevenLabsService {
         throw new Error('ELEVENLABS_AGENT_PHONE_NUMBER_ID environment variable is required for Twilio outbound calls');
       }
 
+      // Build dynamic variables object
+      const dynamicVariables: Record<string, string | number | boolean> = {
+        customer_name: options.firstName || '',
+        ...options.dynamicVariables, // Merge any additional custom variables
+      };
+
       console.log('apikey', this.apiKey);
       const response = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
         method: 'POST',
@@ -68,8 +75,8 @@ export class ElevenLabsService {
           agent_phone_number_id: agentPhoneNumberId,
           to_number: options.to,
           conversation_initiation_client_data: {
-            customer_name: options.firstName || '',
             call_sid: options.callSid || '',
+            dynamic_variables: dynamicVariables,
           },
         }),
       });
